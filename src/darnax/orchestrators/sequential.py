@@ -72,17 +72,43 @@ class SequentialOrchestrator(AbstractOrchestrator[SequentialState]):
     """
 
     lmap: LayerMap  # not static; module parameters will be updated externally
+    field_momentum: float
+    zero_sign_value: float
 
-    def __init__(self, layers: LayerMap):
+    def __init__(
+        self,
+        layers: LayerMap,
+        field_momentum: float = 0.0,
+        zero_sign_value: float = 1.0,
+    ):
         """Initialize the orchestrator from a layermap.
 
         Parameters
         ----------
         layers : LayerMap
             Static adjacency (rows/cols) with Equinox modules as values.
+        field_momentum : float, optional
+            Momentum coefficient for blending old and new pre-activation field.
+            0.0 (default) means no momentum (new field is used as-is).
+        zero_sign_value : float, optional
+            Value substituted for zeros after sign activation. Default 1.0.
 
         """
         self.lmap = layers
+        self.field_momentum = float(field_momentum)
+        self.zero_sign_value = float(zero_sign_value)
+
+    def _apply_field_momentum(self, old_field: Array, new_field: Array) -> Array:
+        tau = self.field_momentum
+        if tau <= 0.0:
+            return new_field
+        return tau * old_field + (1.0 - tau) * new_field
+
+    def _safe_activate(self, receiver_idx: int, field: Array) -> Array:
+        activated = self.lmap[receiver_idx, receiver_idx].activation(field)  # type: ignore
+        if self.zero_sign_value is not None:
+            activated = jnp.where(activated == 0, self.zero_sign_value, activated)
+        return activated
 
     # ---------------------------- public API ----------------------------
 
@@ -91,7 +117,7 @@ class SequentialOrchestrator(AbstractOrchestrator[SequentialState]):
         state: SequentialState,
         rng: KeyArray,
         *,
-        filter_messages: Literal["all", "forward", "backward"] = "all",
+        filter_messages: Literal["all", "forward", "backward", "inference"] = "all",
         skip_output_state: bool = True,
     ) -> tuple[SequentialState, KeyArray]:
         """Run one forward/update sweep for all receivers **except output**.
@@ -108,10 +134,11 @@ class SequentialOrchestrator(AbstractOrchestrator[SequentialState]):
             Current global state.
         rng : KeyArray
             PRNG key (split per receiver/sender).
-        filter_messages : Literal["all", "forward", "backward"]. Default: "all"
+        filter_messages : Literal["all", "forward", "backward", "inference"]. Default: "all"
             Only a subset of the messages are sent during the step. If forward,
             only forward messages (lower-triangle and diagonal) are computed.
-            Same for backward. "All" computes all the messages.
+            Same for backward. "All" computes all the messages. If "inference",
+            messages from the output column are excluded.
         skip_output_state : bool. Default: true.
             If true, we only update internal states (we exclude output state (-1)).
             The idea is that somehow the output is clamped and in some learning phases
@@ -129,7 +156,12 @@ class SequentialOrchestrator(AbstractOrchestrator[SequentialState]):
             rng, sub = jax.random.split(rng)
             messages = self._compute_messages(senders_group, state, rng=sub)
             aggregated: Array = self.lmap[receiver_idx, receiver_idx].reduce(messages)  # type: ignore
-            activated: Array = self.lmap[receiver_idx, receiver_idx].activation(aggregated)  # type: ignore
+
+            prev_field = state.fields[receiver_idx]
+            mixed_field = self._apply_field_momentum(prev_field, aggregated)
+            activated: Array = self._safe_activate(receiver_idx, mixed_field)
+
+            state = state.replace_field(receiver_idx, mixed_field)
             state = state.replace_val(receiver_idx, activated)
         return state, rng
 
@@ -158,11 +190,11 @@ class SequentialOrchestrator(AbstractOrchestrator[SequentialState]):
         """
         warnings.warn(
             """step_inference has been deprecated and will be eliminated in
-        future versions. Use step() with filter_messages=\"forward\"""",
+        future versions. Use step() with filter_messages=\"inference\"""",
             DeprecationWarning,
             stacklevel=2,
         )
-        return self.step(state, rng=rng, filter_messages="forward")
+        return self.step(state, rng=rng, filter_messages="inference")
 
     def predict(self, state: SequentialState, rng: KeyArray) -> tuple[SequentialState, KeyArray]:
         """Compute/refresh the **output** buffer ``state[-1]`` from current buffers.
@@ -185,7 +217,12 @@ class SequentialOrchestrator(AbstractOrchestrator[SequentialState]):
         rng, sub = jax.random.split(rng)
         messages = self._compute_messages(senders_group, state, rng=sub)
         aggregated = self.lmap[receiver_idx, receiver_idx].reduce(messages)  # type: ignore
-        activated = self.lmap[receiver_idx, receiver_idx].activation(aggregated)  # type: ignore
+
+        prev_field = state.fields[receiver_idx]
+        mixed_field = self._apply_field_momentum(prev_field, aggregated)
+        activated = self._safe_activate(receiver_idx, mixed_field)
+
+        state = state.replace_field(receiver_idx, mixed_field)
         state = state.replace_val(-1, activated)
         return state, rng
 
@@ -194,7 +231,7 @@ class SequentialOrchestrator(AbstractOrchestrator[SequentialState]):
         state: SequentialState,
         rng: KeyArray,
         *,
-        filter_messages: Literal["all", "forward", "backward"] = "forward",
+        filter_messages: Literal["all", "forward", "backward", "inference"] = "inference",
         target_state: SequentialState | None = None,
         gate: jax.Array | None = None,
     ) -> Self:
@@ -268,7 +305,11 @@ class SequentialOrchestrator(AbstractOrchestrator[SequentialState]):
                 self.lmap[receiver_idx, receiver_idx].reduce(msgs),  # type: ignore
             )
         # Second pass: ask each module for its update.
-        return type(self)(layers=self._backward_direct(state, activations, target_state, gate))
+        return type(self)(
+            layers=self._backward_direct(state, activations, target_state, gate),
+            field_momentum=self.field_momentum,
+            zero_sign_value=self.zero_sign_value,
+        )
 
     # ---------------------------- internals ----------------------------
 

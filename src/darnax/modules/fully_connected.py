@@ -60,6 +60,8 @@ class FullyConnected(Adapter):
 
     W: Array
     strength: Array
+    lr: Array
+    weight_decay: Array
     threshold: Array
 
     def __init__(
@@ -70,6 +72,9 @@ class FullyConnected(Adapter):
         threshold: float | ArrayLike,
         key: Array,
         dtype: DTypeLike = jnp.float32,
+        *,
+        lr: float = 1.0,
+        weight_decay: float = 0.0,
     ):
         """Initialize weights and per-output scale/threshold.
 
@@ -90,6 +95,10 @@ class FullyConnected(Adapter):
             ``1/sqrt(in_features)``.
         dtype : DTypeLike, optional
             Dtype for parameters (default: ``jnp.float32``).
+        lr : float, optional
+            Learning rate multiplier (default: ``1.0``).
+        weight_decay : float, optional
+            Weight decay coefficient (default: ``0.0``).
 
         Raises
         ------
@@ -100,6 +109,8 @@ class FullyConnected(Adapter):
         """
         self.strength = self._set_shape(strength, out_features, dtype)
         self.threshold = self._set_shape(threshold, out_features, dtype)
+        self.lr = jnp.asarray(lr, dtype=dtype)
+        self.weight_decay = jnp.asarray(weight_decay / (in_features**0.5), dtype=dtype)
         self.W = (
             jax.random.normal(key, (in_features, out_features), dtype=dtype)
             * self.strength
@@ -155,7 +166,8 @@ class FullyConnected(Adapter):
         """
         if gate is None:
             gate = jnp.array(1.0)
-        dW = perceptron_rule_backward(x, y, y_hat, self.threshold, gate)
+        grad = perceptron_rule_backward(x, y, y_hat, self.threshold, gate)
+        dW = self.lr * grad + self.weight_decay * self.lr * self.W
         zero_update = jax.tree.map(jnp.zeros_like, self)
         new_self: Self = eqx.tree_at(lambda m: m.W, zero_update, dW)
         return new_self
@@ -267,6 +279,9 @@ class SparseFullyConnected(FullyConnected):
         sparsity: float,
         key: Array,
         dtype: DTypeLike = jnp.float32,
+        *,
+        lr: float | None = None,
+        weight_decay: float = 0.0,
     ):
         """Initialize sparse mask and masked weight matrix.
 
@@ -291,6 +306,10 @@ class SparseFullyConnected(FullyConnected):
             JAX PRNG key used to sample both the weight matrix and the mask.
         dtype : DTypeLike, optional
             Dtype for parameters (default: ``jnp.float32``).
+        lr : float or None, optional
+            Learning rate multiplier. If None, defaults to 1.0 with sparsity rescaling.
+        weight_decay : float, optional
+            Weight decay coefficient (default: ``0.0``).
 
         Notes
         -----
@@ -301,6 +320,11 @@ class SparseFullyConnected(FullyConnected):
         """
         self.strength = self._set_shape(strength, out_features, dtype)
         self.threshold = self._set_shape(threshold, out_features, dtype)
+        self.lr = jnp.asarray(
+            1.0 if lr is None else lr * (0.1**0.5) / (1 - sparsity) ** 0.5, dtype=dtype
+        )
+        wd_rescaling = (0.1**0.5) / (((1 - sparsity) * in_features) ** 0.5)
+        self.weight_decay = jnp.asarray(weight_decay * wd_rescaling, dtype=dtype)
         key_w, key_mask = jax.random.split(key)
         mask = jax.random.bernoulli(
             key_mask,
@@ -346,8 +370,9 @@ class SparseFullyConnected(FullyConnected):
         never updated.
 
         """
-        dW = perceptron_rule_backward(x, y, y_hat, self.threshold, gate)
-        dW = dW * self._mask
+        grad = perceptron_rule_backward(x, y, y_hat, self.threshold, gate)
+        grad = grad * self._mask
+        dW = self.lr * grad + self.weight_decay * self.lr * self.W
         zero_update = jax.tree.map(jnp.zeros_like, self)
         new_self: Self = eqx.tree_at(lambda m: m.W, zero_update, dW)
         return new_self
@@ -437,6 +462,9 @@ class CEFullyConnected(FullyConnected):
         threshold: float | ArrayLike,
         key: Array,
         dtype: DTypeLike = jnp.float32,
+        *,
+        lr: float = 1.0,
+        weight_decay: float = 0.0,
     ):
         """Initialize weights and hyperparameters for CE-based updates.
 
@@ -456,13 +484,20 @@ class CEFullyConnected(FullyConnected):
             JAX PRNG key used to initialize ``W``.
         dtype : DTypeLike, optional
             Dtype for parameters (default: ``jnp.float32``).
+        lr : float, optional
+            Learning rate multiplier (default: ``1.0``).
+        weight_decay : float, optional
+            Weight decay coefficient (default: ``0.0``).
 
         Notes
         -----
         Initialization is delegated to :class:`FullyConnected` via ``super()``.
 
         """
-        super().__init__(in_features, out_features, strength, threshold, key, dtype)
+        super().__init__(
+            in_features, out_features, strength, threshold, key, dtype,
+            lr=lr, weight_decay=weight_decay,
+        )
 
     def backward(self, x: Array, y: Array, y_hat: Array, gate: Array | None = None) -> Self:
         r"""Return a CE/softmax local gradient update for ``W``.
@@ -511,6 +546,7 @@ class CEFullyConnected(FullyConnected):
         dL_dz = probs - (y + 1) / 2  # B, C
         dL_dW = x.T @ dL_dz / B  # H, C
         dW = dL_dW / (H**0.5)  # same convention as perceptron rule
+        dW = self.lr * dW + self.lr * self.weight_decay * self.W
         zero_update = jax.tree.map(jnp.zeros_like, self)
         new_self: Self = eqx.tree_at(lambda m: m.W, zero_update, dW)
         return new_self

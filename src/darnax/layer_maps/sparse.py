@@ -270,7 +270,9 @@ class LayerMap:
         return MappingProxyType(self._data[i])
 
     def row_items(
-        self, skip_last: bool = False, subset: Literal["backward", "forward", "all"] = "all"
+        self,
+        skip_last: bool = False,
+        subset: Literal["backward", "forward", "all", "inference"] = "all",
     ) -> Iterable[tuple[int, Mapping[int, AbstractModule]]]:
         """Iterate over rows with deterministic ordering and read-only views.
 
@@ -279,13 +281,14 @@ class LayerMap:
         skip_last : bool, default False
             If ``True``, omit the last receiver row (useful when the output row
             is sink-only).
-        subset : ["backward", "forward", "all"], default "all
+        subset : ["backward", "forward", "all", "inference"], default "all"
             If ``forward``, keep only edges ``(i, j)`` with ``j <= i`` (i.e.,
             lower-triangular including the diagonal), which is a common
-            “feed-forward” scheduling constraint.
+            "feed-forward" scheduling constraint.
             If ``backward``, keep only edges ``(i, j)`` with ``j >= i`` (i.e.,
             upper-triangular including the diagonal).
-
+            If ``inference``, keep only edges ``(i, j)`` with ``j != last`` (i.e.,
+            everything except last column).
 
         Yields
         ------
@@ -296,12 +299,19 @@ class LayerMap:
         row_keys = list(self._rows)
         if skip_last:
             row_keys = row_keys[:-1]
+        output_idx: int = row_keys[-1] if row_keys else -1
         for r_idx in row_keys:
             data = self._data[r_idx]
-            if subset == "forward":
+            if subset == "all":
+                pass
+            elif subset == "forward":
                 data = {k: v for k, v in data.items() if k <= r_idx}
             elif subset == "backward":
                 data = {k: v for k, v in data.items() if k >= r_idx}
+            elif subset == "inference":
+                data = {k: v for k, v in data.items() if k != output_idx}
+            else:
+                raise AttributeError(f"Unknown subset: {subset!r}")
             yield r_idx, MappingProxyType(data)
 
     def edge_items(self) -> Iterable[tuple[tuple[int, int], AbstractModule]]:
