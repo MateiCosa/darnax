@@ -1,8 +1,7 @@
 # channel_entropy replication
 
-Trains the best channel_entropy model from T21 from scratch on CIFAR-10 using
-`darnax_update` (this repo, `conv` branch). Runs 5 seeds and plots test accuracy
-over training epochs.
+Trains the channel_entropy model from scratch on CIFAR-10 using this repo
+(`conv` branch). Runs 5 seeds and plots test accuracy over training epochs.
 
 ## Architecture
 
@@ -15,44 +14,36 @@ over training epochs.
 | W_back | `ChannelWBack` | FC(10→16) broadcast over 32×32, frozen |
 | W_out | `PooledFlattenFC` | 8×8 avg-pool + flatten + FC(256→10) |
 
-The original sweep defined an `EntropyJ1` subclass to add entropy modulation.
-This is not needed here — `Conv2DRecurrentDiscrete` in `darnax_update` accepts
-`entropy_beta` and `lambda_entropy` directly.
-
-**Two custom subclasses remain** (non-conv, in the script itself):
-- `ChannelWBack` — reshape logic for label→J1 feedback
-- `PooledFlattenFC` — spatial pooling before the FC readout
+`ChannelWBack` and `PooledFlattenFC` are defined in `darnax.modules.conv.spatial_fc`.
 
 ## Setup
 
 ```bash
-# from darnn_hpc/ root
 conda activate darnn          # or whatever env has jax, equinox, optax, torch
 
-# optional: install darnax_update as editable package
-pip install -e darnax_update/
+# optional: install as editable package
+pip install -e /path/to/darnax/
 ```
 
-No separate installation is needed if you already have the original `darnax`
-package active — the script adds `darnax_update/src` to `sys.path` at runtime
-so the updated conv modules take precedence.
+No separate installation is needed — the script adds `../src` to `sys.path` at
+runtime so the package modules are picked up directly.
 
 ## Run
 
 ```bash
-cd darnax_update/replicate
+cd replicate/
 python replicate_channel_entropy.py
 ```
 
-Trains 5 seeds × 20 epochs, prints per-epoch model-head accuracy, then runs a
-linear probe (20 epochs) on the final J1 representations per seed.
-Saves `accuracy_curves.png` (two panels: head accuracy over epochs + probe bar chart).
+Trains 5 seeds × 20 epochs. After each epoch: evaluates model head accuracy and
+runs a linear probe (20 epochs) on pooled J1 representations.
+Saves `accuracy_curves.png` (two panels: head accuracy and probe accuracy over epochs).
 
-Expected runtime: ~20–40 min on a single GPU (same as the original sweep).
+Expected runtime: ~20–40 min on a single GPU.
 
 ## Hyperparameters
 
-Loaded from `darnn_hpc/logs/91_win_wback_sweep/best_channel_entropy_cfg.json`:
+Loaded from `best_channel_entropy_cfg.json` (same directory):
 
 | Key | Value | Description |
 |-----|-------|-------------|
@@ -78,12 +69,10 @@ W_back is frozen throughout.
 
 ## Notes on accuracy
 
-Two accuracy metrics are reported:
+Two accuracy metrics are reported per epoch:
 
-- **Model head** (`W_out`): per-epoch test accuracy from the model's own `PooledFlattenFC`
-  classification head. Tracked every epoch.
-- **Linear probe**: after all epochs, a `Linear(256, 10, bias=False)` is trained for
-  `PROBE_EPOCHS=20` epochs (Adam, lr=1e-3, `probe_wd=1.433e-4`) on pooled J1
-  representations (8×8 avg-pool → 256-dim). This matches the T21 evaluation protocol.
-  The T21 best result is `probe_acc=0.4501`; the replicate script plots this as a
-  reference line in the probe bar chart.
+- **Model head** (`W_out`): test accuracy from the model's own `PooledFlattenFC`
+  classification head.
+- **Linear probe**: `Linear(256, 10, bias=False)` trained for 20 epochs (Adam,
+  lr=1e-3, wd=1.433e-4) on 8×8 avg-pooled J1 representations (→ 256-dim).
+  Reference best probe accuracy: 0.4501 (shown as dashed line in the plot).

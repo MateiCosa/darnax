@@ -1,15 +1,14 @@
 """replicate_channel_entropy.py
 
-Trains the channel_entropy model from scratch on CIFAR-10 using the darnax_update
-package (MateiCosa/darnax, conv branch).
+Trains the channel_entropy model from scratch on CIFAR-10 using darnax
+(MateiCosa/darnax, conv branch).
 
 Architecture: ChannelWBack + Conv2DRecurrentDiscrete(entropy_beta, lambda_entropy=1)
-  — the EntropyJ1 subclass from the original sweep is not needed because
-  Conv2DRecurrentDiscrete in darnax_update has entropy modulation built in.
+  Conv2DRecurrentDiscrete has entropy modulation built in via entropy_beta and
+  lambda_entropy constructor parameters.
   ChannelWBack and PooledFlattenFC are imported from darnax.modules.conv.spatial_fc.
 
-Hyperparameters are loaded from:
-  darnn_hpc/logs/91_win_wback_sweep/best_channel_entropy_cfg.json
+Hyperparameters are loaded from best_channel_entropy_cfg.json in the same directory.
 
 Usage:
   conda activate darnn
@@ -35,10 +34,9 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-HERE       = Path(__file__).resolve().parent        # darnax_update/replicate/
-DARNAX_SRC = HERE.parent / "src"                   # darnax_update/src/
-DARNN_HPC  = HERE.parent.parent                    # darnn_hpc/
-CFG_PATH   = DARNN_HPC / "logs" / "91_win_wback_sweep" / "best_channel_entropy_cfg.json"
+HERE       = Path(__file__).resolve().parent        # replicate/
+DARNAX_SRC = HERE.parent / "src"                   # src/
+CFG_PATH   = HERE / "best_channel_entropy_cfg.json"
 
 sys.path.insert(0, str(DARNAX_SRC))
 
